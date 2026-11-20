@@ -1020,9 +1020,20 @@ and map_pattern = function
   | PatWhen (v1, v2) ->
       let v1 = map_pattern v1 and v2 = map_expr v2 in
       `PatWhen (v1, v2)
+  | PatDefault (pattern, tok, default) ->
+      map_default_pattern ~tok pattern default
   | OtherPat (v1, v2) ->
       let v1 = map_todo_kind v1 and v2 = map_of_list map_any v2 in
       `OtherPat (v1, v2)
+
+and map_default_pattern ?(tok = fk) pattern default =
+  match pattern with
+  | PatTyped (pattern, typ) ->
+      `PatTyped (map_default_pattern ~tok pattern default, map_type_ typ)
+  | _ ->
+      `OtherPat
+        ( ("ExprToPattern", map_tok tok),
+          [ `E (`LetPattern (map_pattern pattern, map_expr default)) ] )
 
 and map_definition (v1, v2) =
   let v1 = map_entity v1 and v2 = map_definition_kind v2 in
@@ -1164,11 +1175,13 @@ and map_parameter = function
       let v0 = map_tok v0 in
       let v1 = map_parameter_classic v1 in
       `ParamHashSplat (v0, v1)
-  | ParamPattern (v1, _) ->
-      (* The v1 synthetic parameter_classic is not part of the v1 spec;
-       * drop it. *)
-      let v1 = map_pattern v1 in
-      `ParamPattern v1
+  | ParamPattern (pattern, { pdefault; _ }) ->
+      let pattern =
+        match pdefault with
+        | None -> map_pattern pattern
+        | Some default -> map_default_pattern pattern default
+      in
+      `ParamPattern pattern
   | ParamEllipsis v1 -> raise (SemgrepConstruct v1)
   | ParamReceiver v1 ->
       let v1 = map_parameter_classic v1 in

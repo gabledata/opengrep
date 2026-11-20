@@ -16,7 +16,7 @@
 module G = AST_generic
 
 class ['self] pat_id_visitor =
-  object (_self : 'self)
+  object (self : 'self)
     inherit ['self] AST_generic.iter_no_id_info as super
 
     method! visit_pattern store pat =
@@ -25,6 +25,7 @@ class ['self] pat_id_visitor =
       | PatId (id, id_info) ->
           super#visit_pattern store pat;
           Stack_.push (id, id_info) store
+      | G.PatDefault (binding, _, _) -> self#visit_pattern store binding
       | G.OtherPat (_, [ G.E { e = G.Record (_b1, fields, _b2); _ } ]) ->
           (* JS allows object destructuring in the parameter list. *)
           (* TODO Handle array destructuring *)

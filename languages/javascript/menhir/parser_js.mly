@@ -682,7 +682,7 @@ binding_property:
     { match $2 with
       (* { x } shorthand for { x: x }, like in OCaml *)
       | None -> mk_FieldColon (PN $1) (Some (Id $1))
-      | Some (_, e) -> mk_FieldColon (PN $1) (Some e)
+      | Some (equals, default) -> FieldPatDefault (Id $1, equals, default)
     }
  | property_name ":" binding_element { mk_FieldColon $1 (Some $3) }
  (* can appear only at the end of a binding_property_list in ECMA *)

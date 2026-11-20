@@ -13,3 +13,21 @@ function with_default({a, b} = {a: 1, b: 2}) { return a; }
 
 //MATCH:
 function without_default({a, b}) { return a; }
+
+function with_callback_default({a, b}: Options = {a: () => {
+  const local = source();
+  sink(local);
+}, b: 2}) { return a; }
+
+function with_field_defaults({a: renamed = source(), b = seed}: Options) {
+  return renamed;
+}
+
+//MATCH:
+function with_nested_defaults({outer: {value = helper(), marker}}) {
+  return value;
+}
+
+function array_parameter([first, second]) { return first; }
+
+function array_default([first = helper(), second]) { return first; }

@@ -1089,6 +1089,9 @@ and vof_pattern = function
   | PatWhen (v1, v2) ->
       let v1 = vof_pattern v1 and v2 = vof_expr v2 in
       OCaml.VSum ("PatWhen", [ v1; v2 ])
+  | PatDefault (pattern, tok, default) ->
+      OCaml.VSum
+        ("PatDefault", [ vof_pattern pattern; vof_tok tok; vof_expr default ])
   | PatAs (v1, v2) ->
       let v1 = vof_pattern v1
       and v2 =

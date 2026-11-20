@@ -2599,10 +2599,10 @@ and pat_or_assign_pat (env : env) (x : CST.anon_choice_pat_3297d92) :
   match x with
   | `Pat x -> pattern env x
   | `Assign_pat (v1, v2, v3) ->
-      let pat = pattern env v1 in
-      let _eq = token env v2 (* "=" *) in
-      let _default = expression env v3 in
-      pat
+      let pat = pattern env v1 |> sub_pattern in
+      let equals = token env v2 (* "=" *) in
+      let default = expression env v3 in
+      Right (Assign (pat, equals, default))
 
 and formal_parameter (env : env) (x : CST.formal_parameter) : parameter =
   let parameter_of_id_or_pat id_or_pat opt_type opt_default =

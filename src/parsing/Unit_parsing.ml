@@ -301,10 +301,139 @@ let parsing_rules_with_atd_tests () =
 (* Tests *)
 (*****************************************************************************)
 
+let destructuring_default_export_tests () =
+  let parameter : Ast_generic_v1_t.stmt -> Ast_generic_v1_t.parameter = function
+    | `DefStmt (_, `FuncDef { fparams = [ parameter ]; _ }) -> parameter
+    | _ -> Alcotest.fail "expected a function with one parameter"
+  in
+  let rec token_count name = function
+    | `List [ `String "OriginTok"; `Assoc fields ] -> (
+        match List.assoc_opt "str" fields with
+        | Some (`String value) when String.equal name value -> 1
+        | _ -> 0)
+    | `List values ->
+        List.fold_left
+          (fun count value -> count + token_count name value)
+          0 values
+    | `Assoc fields ->
+        List.fold_left
+          (fun count (key, value) ->
+            if String.equal key "id_svalue" then count
+            else count + token_count name value)
+          0 fields
+    | _ -> 0
+  in
+  let check_tokens statement expected =
+    let json =
+      Ast_generic_v1_j.string_of_parameter (parameter statement)
+      |> Yojson.Safe.from_string
+    in
+    List.iter
+      (fun (name, count) ->
+        Alcotest.(check int)
+          ("retained token " ^ name) count (token_count name json))
+      expected
+  in
+  Testo.categorize "V1 AST export"
+    [
+      t ~tags:(Test_tags.tags_of_lang Lang.Ts)
+        "destructuring parameter defaults" (fun () ->
+          let file =
+            tests_path / "patterns" / "ts" / "destructure_param_default.ts"
+          in
+          let ast = Parse_target.parse_and_resolve_name_strict Lang.Ts file in
+          let exported = AST_generic_to_v1.program ast in
+          match exported with
+          | [
+           _with_default;
+           without_default;
+           with_callback;
+           with_fields;
+           with_nested;
+           with_array;
+           with_array_default;
+          ] ->
+              (match parameter without_default with
+              | `ParamPattern (`PatRecord _) -> ()
+              | _ -> Alcotest.fail "nondefault pattern changed shape");
+              (match parameter with_callback with
+              | `ParamPattern
+                  (`PatTyped
+                    ( `OtherPat
+                        ( ("ExprToPattern", _),
+                          [ `E (`LetPattern (`PatRecord (_, fields, _), _)) ] ),
+                      _ )) ->
+                  Alcotest.(check int)
+                    "retained bindings" 2 (List.length fields)
+              | _ -> Alcotest.fail "default or outer type annotation was lost");
+              check_tokens with_callback
+                [ ("source", 1); ("sink", 1); ("local", 2) ];
+              (match parameter with_fields with
+              | `ParamPattern (`PatTyped (`PatRecord (_, fields, _), _)) ->
+                  let bindings =
+                    List.map
+                      (function
+                        | ( [ (label, _) ],
+                            `OtherPat
+                              ( ("ExprToPattern", _),
+                                [ `E (`LetPattern (`PatId ((name, _), _), _)) ]
+                              ) ) ->
+                            label ^ ":" ^ name
+                        | _ -> Alcotest.fail "field default binding was lost")
+                      fields
+                  in
+                  Alcotest.(check (list string))
+                    "source keys and bindings" [ "a:renamed"; "b:b" ] bindings
+              | _ -> Alcotest.fail "field defaults lost their record shape");
+              check_tokens with_fields [ ("source", 1); ("seed", 1) ];
+              (match parameter with_nested with
+              | `ParamPattern
+                  (`PatRecord
+                    (_, [ ([ ("outer", _) ], `PatRecord (_, fields, _)) ], _))
+                -> (
+                  match fields with
+                  | [
+                   ( [ ("value", _) ],
+                     `OtherPat
+                       ( ("ExprToPattern", _),
+                         [ `E (`LetPattern (`PatId (("value", _), _), _)) ] ) );
+                   ([ ("marker", _) ], `PatId (("marker", _), _));
+                  ] ->
+                      ()
+                  | _ -> Alcotest.fail "nested default or sibling was lost")
+              | _ -> Alcotest.fail "nested record shape was lost");
+              check_tokens with_nested [ ("helper", 1) ];
+              (match parameter with_array with
+              | `ParamPattern
+                  (`PatList
+                    ( _,
+                      [ `PatId (("first", _), _); `PatId (("second", _), _) ],
+                      _ )) ->
+                  ()
+              | _ -> Alcotest.fail "ordinary array pattern changed shape");
+              (match parameter with_array_default with
+              | `ParamPattern
+                  (`PatList
+                    ( _,
+                      [
+                        `OtherPat
+                          ( ("ExprToPattern", _),
+                            [ `E (`LetPattern (`PatId (("first", _), _), _)) ]
+                          );
+                        `PatId (("second", _), _);
+                      ],
+                      _ )) ->
+                  ()
+              | _ -> Alcotest.fail "array default or sibling was lost");
+              check_tokens with_array_default [ ("helper", 1) ]
+          | _ -> Alcotest.fail "expected seven function declarations");
+    ]
+
 let make_tests langs_with_tolerance =
   List_.flatten
     [
       lang_parsing_tests langs_with_tolerance;
+      destructuring_default_export_tests ();
       parsing_error_tests ();
       parsing_rules_tests ();
       supply_chain_rules_tests ();

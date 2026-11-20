@@ -3217,6 +3217,11 @@ and m_pattern a b =
   match (a, b) with
   (* equivalence: user-defined equivalence! *)
   | G.DisjPat (a1, a2), b -> m_pattern a1 b >||> m_pattern a2 b
+  | G.PatDefault (a1, a2, a3), B.PatDefault (b1, b2, b3) ->
+      m_pattern a1 b1 >>= fun () ->
+      m_tok a2 b2 >>= fun () -> m_expr a3 b3
+  (* Omitting a default matches the same binding with or without one. *)
+  | a, B.PatDefault (binding, _, _) -> m_pattern a binding
   (* metavar: *)
   (* less: G.PatId vs B.PatId? Use MV.Id then ? *)
   (* PatternHole consists of fake tokens only, and should match $_ but not $A *)
@@ -3308,6 +3313,7 @@ and m_pattern a b =
   | G.PatWildcard _, _
   | G.PatDisj _, _
   | G.PatWhen _, _
+  | G.PatDefault _, _
   | G.PatAs _, _
   | G.PatTyped _, _
   | G.OtherPat _, _

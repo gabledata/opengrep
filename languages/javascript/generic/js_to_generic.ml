@@ -438,7 +438,7 @@ and stmt x =
 
 and catch_block = function
   | BoundCatch (t, v1, v2) ->
-      let v1 = H.expr_to_pattern (expr v1) and v2 = stmt v2 in
+      let v1 = pattern v1 and v2 = stmt v2 in
       (t, G.CatchPattern v1, v2)
   | UnboundCatch (t, v1) ->
       let v1 =
@@ -475,9 +475,7 @@ and for_header = function
         (* TODO: v_init is not always _NONE! when we use multivardef!!! *)
         | Left ({ name = id; attrs = _TODO }, { v_init = _NONE; _ }) ->
             G.PatId (id, G.empty_id_info ())
-        | Right e ->
-            let e = expr e in
-            H.expr_to_pattern e
+        | Right e -> pattern e
       in
       G.ForEach (pattern, t, v2)
   | ForOf (v1, t, v2) ->
@@ -487,9 +485,7 @@ and for_header = function
         (* TODO: v_init is not always _NONE! when we use multivardef!!! *)
         | Left ({ name = id; attrs = _TODO }, { v_init = _NONE; _ }) ->
             G.PatId (id, G.empty_id_info ())
-        | Right e ->
-            let e = expr e in
-            H.expr_to_pattern e
+        | Right e -> pattern e
       in
       let e =
         G.Call (G.IdSpecial (G.ForOf, t) |> G.e, fb [ G.Arg v2 ]) |> G.e
@@ -658,9 +654,23 @@ and parameter_binding = function
       | Some tok -> G.ParamRest (tok, pclassic))
   | ParamEllipsis x -> G.ParamEllipsis x
 
-and pattern x =
-  let x = expr x in
-  H.expr_to_pattern x
+and pattern = function
+  | Obj (left, fields, right) ->
+      let fields = List.filter_map pattern_property fields in
+      G.PatRecord (left, fields, right)
+  | Arr elements -> G.PatList (bracket (list pattern) elements)
+  | Assign (binding, equals, default) ->
+      G.PatDefault (pattern binding, info equals, expr default)
+  | x -> H.expr_to_pattern (expr x)
+
+and pattern_property = function
+  | Field { fld_name = PN id; fld_body = Some binding; _ }
+  | FieldColon { fld_name = PN id; fld_body = Some binding; _ } ->
+      Some ([ name id ], pattern binding)
+  | FieldPatDefault ((Id id as binding), equals, default) ->
+      Some
+        ([ name id ], G.PatDefault (pattern binding, info equals, expr default))
+  | _ -> None
 
 and parameter x =
   match x with

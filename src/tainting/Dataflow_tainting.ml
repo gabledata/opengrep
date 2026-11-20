@@ -3247,7 +3247,9 @@ let pattern_leaves_with_offsets ~(lang : Lang.t) (pat : AST_generic.pattern) :
             in
             go offset (G.PatList (l, pairs, r)) acc
         | None -> acc)
-    | G.PatTyped (inner, _) -> go offset inner acc
+    | G.PatTyped (inner, _)
+    | G.PatDefault (inner, _, _) ->
+        go offset inner acc
     | G.PatTuple (_, pats, _) | G.PatList (_, pats, _)
       when AST_generic_helpers.is_map_pair_list pats ->
         (* Map/dict destructure: project by key, not by position. *)

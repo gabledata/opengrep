@@ -1580,6 +1580,8 @@ and pattern =
   (* OCaml and Scala *)
   | PatDisj of pattern * pattern (* also abused for catch in Java *)
   | PatTyped of pattern * type_
+  (* JS/TS binding fallback, evaluated only for an undefined input. *)
+  | PatDefault of pattern * tok * expr
   | PatWhen of pattern * expr (* TODO: add tok, 'when' OCaml, 'if' Scala *)
   (* newvar:! *)
   | PatAs of pattern * (ident * id_info)

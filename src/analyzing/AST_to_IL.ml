@@ -384,7 +384,9 @@ let rec is_destructuring_pattern (p : G.pattern) : bool =
   (* `let x @ p = f()`: [pattern] binds both the alias and the inner
    * pattern's variables, whatever shape [p] has — even a plain
    * `let a @ b` binds two variables, which [lval_of_ent] cannot do. *)
-  | G.PatAs _ -> true
+  | G.PatAs _
+  | G.PatDefault _ ->
+      true
   | _ -> false
 
 (* The operator that tests a case against the scrutinee. A Ruby or
@@ -446,7 +448,8 @@ let rec pattern_binds (pat : G.pattern) : bool =
   | G.DisjPat (p1, p2) ->
       pattern_binds p1 || pattern_binds p2
   | G.PatTyped (p, _)
-  | G.PatWhen (p, _) ->
+  | G.PatWhen (p, _)
+  | G.PatDefault (p, _, _) ->
       pattern_binds p
   | G.OtherPat (_, anys) ->
       List.exists
@@ -752,6 +755,13 @@ and pattern env pat : stmts * lval * stmts =
           fixed_ss @ rest_ss @ unbindable_ss
       in
       ([], tmp_lval, ss)
+  | G.PatDefault (binding, tok, default) ->
+      let tmp = fresh_lval env tok in
+      let eorig = Related (G.P pat) in
+      let selected = mk_e (Fetch tmp) eorig in
+      let fallback = assign_default_if_undefined env ~eorig tok tmp default in
+      let bind = pattern_assign_statements env ~eorig selected binding in
+      ([], tmp, fallback :: bind)
   | G.PatTyped (pat1, ty) ->
       let pre_ss, _ = type_ env ty in
       let inner_pre_ss, lval, post_ss = pattern env pat1 in
@@ -886,6 +896,9 @@ and pattern env pat : stmts * lval * stmts =
       (pre_ss, tmp, [])
     in
     match e.G.e with
+    | G.Assign (binding, tok, default)
+      when env.pattern_binds_lvals && Lang.is_js env.lang ->
+        pattern env (G.PatDefault (H.expr_to_pattern binding, tok, default))
     | (G.N _ | G.DotAccess _ | G.ArrayAccess _ | G.DeRef _)
       when env.pattern_binds_lvals -> (
         try
@@ -971,6 +984,26 @@ and pattern_assign_statements env ?(eorig = NoOrig) exp pat : stmt list =
   with
   | Fixme (kind, any_generic) ->
       fixme_stmt kind any_generic
+
+(* The selected value is already evaluated; only undefined evaluates the default. *)
+and assign_default_if_undefined env ~eorig tok selected default : stmt =
+  let ss_default, default_exp =
+    expr { env with pattern_binds_lvals = false } default
+  in
+  let condition =
+    mk_e
+      (Operator
+         ( (G.PhysEq, tok),
+           [
+             Unnamed (mk_e (Fetch selected) eorig);
+             Unnamed (mk_e (Literal (G.Undefined tok)) NoOrig);
+           ] ))
+      NoOrig
+  in
+  let fallback =
+    ss_default @ [ mk_s (Instr (mk_i (Assign (selected, default_exp)) eorig)) ]
+  in
+  mk_s (If (tok, condition, fallback, []))
 
 (* Lower `pat = e`: evaluate [e], then bind the pattern's variables. The
  * single lowering behind both [G.LetPattern] and the destructuring
@@ -1155,7 +1188,9 @@ and pattern_match_cond env (scrutinee : IL.exp) (pat : G.pattern) :
   | G.PatId (id, id_info) when IdFlags.is_path_pattern !(id_info.G.id_flags) ->
       value_test (G.N (G.Id (id, id_info)) |> G.e)
   | G.PatId ((_, tok), _) -> ([], true_at tok)
-  | G.PatAs (inner, _) -> pattern_match_cond env scrutinee inner
+  | G.PatAs (inner, _)
+  | G.PatDefault (inner, _, _) ->
+      pattern_match_cond env scrutinee inner
   (* A subpattern `a: p` of a C# positional pattern (`(a: FOO, ...)`): `p` is
    * tested at the element's position. *)
   | G.OtherPat (("Subpattern", _), [ G.I _; G.P inner ]) ->
@@ -1403,8 +1438,41 @@ and assign_to_record env (tok1, fields, tok2) rhs_exp lhs_orig : stmts * exp =
     let ss = List.concat_map fst results in
     let fields = List.map snd results in
     (ss, fields)
+  and do_default_field acc_rev_offsets fldi tok binding default eorig =
+    let offset = { o = Dot fldi; oorig = NoOrig } in
+    let field =
+      mk_e
+        (Fetch { base = Var tmp; rev_offset = offset :: acc_rev_offsets })
+        (related_tok tok)
+    in
+    let selected = fresh_lval env tok in
+    let read = mk_s (Instr (mk_i (Assign (selected, field)) eorig)) in
+    let fallback =
+      assign_default_if_undefined env ~eorig tok selected default
+    in
+    let bind_ss, bound =
+      assign env ~g_expr:binding binding tok (mk_e (Fetch selected) eorig)
+    in
+    (read :: fallback :: bind_ss, Field (fldi, bound))
   and do_field acc_rev_offsets sibling_keys f =
     match f with
+    | G.F
+        {
+          s =
+            G.DefStmt
+              ( { name = EN (G.Id (id, ii)); _ },
+                G.FieldDefColon
+                  {
+                    vinit =
+                      Some
+                        ({ e = G.Assign (binding, tok, default); _ } as value);
+                    _;
+                  } );
+          _;
+        }
+      when Lang.is_js env.lang ->
+        do_default_field acc_rev_offsets (var_of_id_info id ii) tok binding
+          default (related_exp value)
     | G.F
         {
           s =
@@ -1446,29 +1514,12 @@ and assign_to_record env (tok1, fields, tok2) rhs_exp lhs_orig : stmts * exp =
         {
           s =
             G.ExprStmt
-              ({ e = G.LetPattern (G.PatId (id, ii), _default); _ }, _);
+              (({ e = G.LetPattern (G.PatId (id, ii), default); _ } as value), _);
           _;
         } ->
-        (* JS/TS object-shorthand destructure with a default value:
-         * `{ fld = default }`. The binding name and the field name are the
-         * same identifier `fld`; lower as [fld := tmp. ... .fld], exactly
-         * like the no-default `{ fld }` case above. The default is a fallback
-         * taken only when the field is absent, so for taint (a may-analysis)
-         * the field-present value dominates; ignoring it here matches the
-         * lowering of the renamed form `{ fld: v = default }`. *)
-        let tok = snd id in
-        let fldi = var_of_id_info id ii in
-        let offset = { o = Dot fldi; oorig = NoOrig } in
-        let vari_lval = lval_of_id_info id ii in
-        let ei =
-          mk_e
-            (Fetch { base = Var tmp; rev_offset = offset :: acc_rev_offsets })
-            (related_tok tok)
-        in
-        let instr =
-          mk_s (Instr (mk_i (Assign (vari_lval, ei)) (related_tok tok)))
-        in
-        ([ instr ], Field (fldi, mk_e (Fetch vari_lval) (related_tok tok)))
+        let binding = G.N (G.Id (id, ii)) |> G.e in
+        do_default_field acc_rev_offsets (var_of_id_info id ii) (snd id) binding
+          default (related_exp value)
     | G.F
         {
           s =

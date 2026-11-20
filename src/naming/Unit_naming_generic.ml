@@ -164,6 +164,85 @@ let check_single_binding ast name =
 let tests parse_program =
   Testo.categorize "naming generic"
     [
+      t "destructuring default closures are named once" (fun () ->
+          let file =
+            Fpath.v
+              (tests_path ^ "/naming/js/destructuring_default_initializer.ts")
+          in
+          let ast = parse_program file in
+          Naming_AST.resolve Lang.Ts ast;
+          match
+            (def_sid_of_name ast "captured", resolutions_of_name ast "captured")
+          with
+          | Some declaration, [ Some (_, reference) ] ->
+              Alcotest.(check bool)
+                "default closure local keeps its declaration identity" true
+                (AST_generic.SId.equal declaration reference)
+          | _ -> Alcotest.fail "expected the default closure local and its use");
+      t "destructuring defaults retain self and later binding identity"
+        (fun () ->
+          let file =
+            Fpath.v (tests_path ^ "/naming/js/destructuring_default_identity.ts")
+          in
+          let ast = parse_program file in
+          Naming_AST.resolve Lang.Ts ast;
+          let binding_sid name =
+            let bindings = ref [] in
+            let visitor =
+              object
+                inherit [_] AST_generic.iter_no_id_info as super
+
+                method! visit_pattern env pat =
+                  (match pat with
+                  | AST_generic.PatId ((s, _), info) when s = name ->
+                      bindings := !(info.AST_generic.id_resolved) :: !bindings
+                  | _ -> ());
+                  super#visit_pattern env pat
+              end
+            in
+            visitor#visit_program () ast;
+            match !bindings with
+            | [ Some (_, sid) ] -> sid
+            | _ -> Alcotest.failf "expected one %s binding" name
+          in
+          let self = binding_sid "self" in
+          (match resolutions_of_name ast "self" with
+          | [ Some (_, capture); Some (_, body) ] ->
+              Alcotest.(check bool)
+                "self capture and body use the same binding" true
+                (AST_generic.SId.equal self capture
+                && AST_generic.SId.equal self body)
+          | _ -> Alcotest.fail "expected self capture and body use");
+          (match
+             (def_sid_of_name ast "outside", resolutions_of_name ast "outside")
+           with
+          | Some declaration, [ Some (_, annotation) ] ->
+              Alcotest.(check bool)
+                "annotation resolves visible outer names" true
+                (AST_generic.SId.equal declaration annotation)
+          | _ -> Alcotest.fail "expected the annotation's outer type query");
+          let later = binding_sid "later" in
+          match
+            (def_sid_of_name ast "later", resolutions_of_name ast "later")
+          with
+          | ( Some global,
+              [
+                Some (_, outside);
+                Some (_, earlier);
+                Some (_, own);
+                Some (_, body);
+              ] ) ->
+              Alcotest.(check bool)
+                "outside capture keeps the global owner" true
+                (AST_generic.SId.equal global outside
+                && not (AST_generic.SId.equal global later));
+              List.iter
+                (fun sid ->
+                  Alcotest.(check bool)
+                    "later binding keeps both captures and body" true
+                    (AST_generic.SId.equal later sid))
+                [ earlier; own; body ]
+          | _ -> Alcotest.fail "expected global, later capture and body uses");
       t "switch value labels preserve the constant binding" (fun () ->
           [
             ("c", "c");
