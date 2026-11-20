@@ -301,10 +301,63 @@ let parsing_rules_with_atd_tests () =
 (* Tests *)
 (*****************************************************************************)
 
+let python_mapping_pattern_tests () =
+  Testo.categorize "Python mapping patterns"
+    [
+      t ~tags:(Test_tags.tags_of_lang Lang.Python)
+        "dotted and numeric keys are kept" (fun () ->
+          let file = tests_path_parsing / "python" / "match_mapping_keys.py" in
+          let ast = Parse_target.parse_and_resolve_name_strict Lang.Python file in
+          let cases = ref [] in
+          let visitor =
+            object
+              inherit [_] AST_generic.iter_no_id_info as super
+
+              method! visit_case env case =
+                (match case with
+                | AST_generic.Case (_, pattern) -> cases := pattern :: !cases
+                | _ -> ());
+                super#visit_case env case
+            end
+          in
+          visitor#visit_program () ast;
+          let open AST_generic in
+          let unwrap = function
+            | PatTuple (_, [ pattern ], _) -> pattern
+            | pattern -> pattern
+          in
+          match List.rev_map unwrap !cases with
+          | [ dynamic; static ] ->
+              (match dynamic with
+              | PatList
+                  ( _,
+                    [
+                      PatKeyVal
+                        ( OtherPat
+                            (("ExprToPattern", _), [ E { e = DotAccess _; _ } ]),
+                          PatId (("found", _), _) );
+                      PatKeyVal (PatLiteral (String _), PatId (("a", _), _));
+                      PatKeyVal (PatLiteral (Int _), PatId (("one", _), _));
+                    ],
+                    _ ) ->
+                  ()
+              | _ -> Alcotest.fail "a key of the dynamic mapping was lost");
+              (match static with
+              | PatRecord
+                  ( _,
+                    [ ([ ("a", _) ], PatId (("a", _), _)); ([ ("b", _) ], PatId (("b", _), _)) ],
+                    _ ) ->
+                  ()
+              | _ -> Alcotest.fail "an all-string mapping changed shape")
+          | _ -> Alcotest.fail "expected two case patterns");
+    ]
+
+
 let make_tests langs_with_tolerance =
   List_.flatten
     [
       lang_parsing_tests langs_with_tolerance;
+      python_mapping_pattern_tests ();
       parsing_error_tests ();
       parsing_rules_tests ();
       supply_chain_rules_tests ();

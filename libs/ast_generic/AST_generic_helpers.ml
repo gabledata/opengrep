@@ -302,34 +302,50 @@ let rec expr_to_pattern e =
         (Id (("...", tok), empty_id_info ()), [ expr_to_pattern rest_target ])
   (* Dict destructuring (e.g. Python [{"a": x}], Elixir map patterns
    * after the frontend lowers them). Each entry is
-   * [Container(Tuple, [key; val])]. Entries whose key is a static
-   * ident / string / atom are routed through [PatRecord]; the
-   * [AST_to_IL.PatRecord] lowering emits a [Dot] offset per field,
+   * [Container(Tuple, [key; val])]. When every key is a static
+   * ident / string / atom, the entries are routed through [PatRecord];
+   * the [AST_to_IL.PatRecord] lowering emits a [Dot] offset per field,
    * which is what makes field-sensitive lookups and destructured HOF
    * callbacks work end-to-end.
    *
-   * Entries with non-static keys are dropped here; their values never
-   * bind usefully through pattern destructuring. *)
+   * A key can also be a value pattern or a number (Python
+   * [{Color.RED: x, 1: y}]). Such a key cannot name a record field, so a
+   * dict with one becomes a list of [PatKeyVal] map pairs instead, keeping
+   * every entry: the key as a pattern and the value it binds. *)
   | Container (Dict, (t1, xs, t2)) ->
-      let fields =
-        List.filter_map
-          (fun entry ->
-            match entry.e with
-            | Container (Tuple, (_, [ k; v ], _)) -> (
-                let key_ident =
-                  match k.e with
-                  | L (String (_, (s, tok), _)) -> Some (s, tok)
-                  | L (Atom (tok, (s, _))) -> Some (s, tok)
-                  | N (Id (id, _)) -> Some id
-                  | _ -> None
-                in
-                match key_ident with
-                | Some ident -> Some ([ ident ], expr_to_pattern v)
-                | None -> None)
-            | _ -> None)
-          xs
+      let static_key k =
+        match k.e with
+        | L (String (_, (s, tok), _)) -> Some (s, tok)
+        | L (Atom (tok, (s, _))) -> Some (s, tok)
+        | N (Id (id, _)) -> Some id
+        | _ -> None
       in
-      PatRecord (t1, fields, t2)
+      let pair entry =
+        match entry.e with
+        | Container (Tuple, (_, [ k; v ], _)) -> Some (k, v)
+        | _ -> None
+      in
+      let pairs = List.filter_map pair xs in
+      if
+        Int.equal (List.length pairs) (List.length xs)
+        && List.exists (fun (k, _) -> Option.is_none (static_key k)) pairs
+      then
+        PatList
+          ( t1,
+            pairs
+            |> List_.map (fun (k, v) ->
+                   PatKeyVal (expr_to_pattern k, expr_to_pattern v)),
+            t2 )
+      else
+        let fields =
+          List.filter_map
+            (fun (k, v) ->
+              match static_key k with
+              | Some ident -> Some ([ ident ], expr_to_pattern v)
+              | None -> None)
+            pairs
+        in
+        PatRecord (t1, fields, t2)
   (* Object/record literal used as a destructuring pattern (JS/TS
    * [{cb, data}] or [{cb: handler}]). Each field is a [DefStmt] whose
    * entity name is the field label and whose [vinit] (or the
