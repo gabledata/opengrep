@@ -1,3 +1,6 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-20  Keep dotted and numeric keys of Python mapping patterns
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 open Common
 open Fpath_.Operators
 module E = Core_error
