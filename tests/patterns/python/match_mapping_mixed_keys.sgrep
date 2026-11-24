@@ -1,0 +1,3 @@
+match $X:
+    case {"a": $A}:
+        $Y

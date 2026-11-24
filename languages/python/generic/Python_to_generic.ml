@@ -879,14 +879,40 @@ and cases_and_body env = function
 and case env = function
   | Case (tok, cp) ->
       let x = info tok in
-      let rec to_gexpr = function
-        | CasePat e -> expr env e
-        | CasePatWhen (cp, g) ->
-            G.OtherExpr
-              (("CasePatWhen", x), [ G.E (to_gexpr cp); G.E (expr env g) ])
-            |> G.e
+      let rec to_pattern (cp : case_pattern) : G.pattern =
+        match cp with
+        | CasePat e -> case_pattern env e
+        | CasePatWhen (cp, g) -> G.PatWhen (to_pattern cp, expr env g)
       in
-      G.Case (x, H.expr_to_pattern (to_gexpr cp))
+      G.Case (x, to_pattern cp)
+
+(* A pattern of a `case` (PEP 634). A mapping pattern is a map pattern
+ * ([H.map_pattern]), open as in Python: it matches a mapping with other
+ * keys too. Each `key: value` entry is a [G.PatKeyVal] whatever its key
+ * (a literal or a value pattern such as `Color.RED`); `**rest` and the
+ * `...` of a rule stay entries of the map pattern. Sequence, group and
+ * `as` patterns are converted here so that a mapping pattern nested in
+ * them is a map pattern too. *)
+and case_pattern (env : env) (e : expr) : G.pattern =
+  match e with
+  | DictOrSet (CompList (l, elts, r)) ->
+      H.map_pattern (l, List_.map (mapping_pattern_entry env) elts, r)
+  | List (CompList (l, xs, r), _) ->
+      G.PatList (l, List_.map (case_pattern env) xs, r)
+  | Tuple (CompList (l, xs, r), _) ->
+      G.PatTuple (l, List_.map (case_pattern env) xs, r)
+  | ParenExpr (_, e, _) -> case_pattern env e
+  | AsPattern (p, _, id) ->
+      G.PatAs (case_pattern env p, (name env id, G.empty_id_info ()))
+  | _ -> H.expr_to_pattern (expr env e)
+
+and mapping_pattern_entry (env : env) (elt : dictorset_elt) : G.pattern =
+  match elt with
+  | KeyVal (key, value) ->
+      G.PatKeyVal (H.expr_to_pattern (expr env key), case_pattern env value)
+  | Key _
+  | PowInline _ ->
+      H.expr_to_pattern (dictorset_elt env elt)
 
 and ident_and_id_info env x =
   let x = name env x in

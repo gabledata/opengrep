@@ -308,7 +308,7 @@ let python_mapping_pattern_tests () =
   Testo.categorize "Python mapping patterns"
     [
       t ~tags:(Test_tags.tags_of_lang Lang.Python)
-        "dotted and numeric keys are kept" (fun () ->
+        "a mapping pattern is a map pattern of all its entries" (fun () ->
           let file = tests_path_parsing / "python" / "match_mapping_keys.py" in
           let ast = Parse_target.parse_and_resolve_name_strict Lang.Python file in
           let cases = ref [] in
@@ -325,33 +325,38 @@ let python_mapping_pattern_tests () =
           in
           visitor#visit_program () ast;
           let open AST_generic in
-          let unwrap = function
-            | PatTuple (_, [ pattern ], _) -> pattern
-            | pattern -> pattern
+          let entries (pattern : pattern) : pattern list option =
+            let map =
+              match pattern with
+              | PatTuple (_, [ map ], _) -> map
+              | map -> map
+            in
+            Option.map
+              (fun ((_, entries, _) : pattern list bracket) -> entries)
+              (AST_generic_helpers.map_pattern_entries map)
           in
-          match List.rev_map unwrap !cases with
-          | [ dynamic; static ] ->
-              (match dynamic with
-              | PatList
-                  ( _,
-                    [
-                      PatKeyVal
-                        ( OtherPat
-                            (("ExprToPattern", _), [ E { e = DotAccess _; _ } ]),
-                          PatId (("found", _), _) );
-                      PatKeyVal (PatLiteral (String _), PatId (("a", _), _));
-                      PatKeyVal (PatLiteral (Int _), PatId (("one", _), _));
-                    ],
-                    _ ) ->
+          match List.rev_map entries !cases with
+          | [ mixed; strings ] ->
+              (match mixed with
+              | Some
+                  [
+                    PatKeyVal
+                      ( OtherPat
+                          (("ExprToPattern", _), [ E { e = DotAccess _; _ } ]),
+                        PatId (("found", _), _) );
+                    PatKeyVal (PatLiteral (String _), PatId (("a", _), _));
+                    PatKeyVal (PatLiteral (Int _), PatId (("one", _), _));
+                  ] ->
                   ()
-              | _ -> Alcotest.fail "a key of the dynamic mapping was lost");
-              (match static with
-              | PatRecord
-                  ( _,
-                    [ ([ ("a", _) ], PatId (("a", _), _)); ([ ("b", _) ], PatId (("b", _), _)) ],
-                    _ ) ->
+              | _ -> Alcotest.fail "an entry of the mixed-key mapping was lost");
+              (match strings with
+              | Some
+                  [
+                    PatKeyVal (PatLiteral (String _), PatId (("a", _), _));
+                    PatKeyVal (PatLiteral (String _), PatId (("b", _), _));
+                  ] ->
                   ()
-              | _ -> Alcotest.fail "an all-string mapping changed shape")
+              | _ -> Alcotest.fail "the string-key mapping is not a map pattern")
           | _ -> Alcotest.fail "expected two case patterns");
     ]
 
