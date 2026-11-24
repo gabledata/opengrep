@@ -1,3 +1,6 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (**
    Derive a JS/TS AST from a tree-sitter TS (or TSX) CST.
 

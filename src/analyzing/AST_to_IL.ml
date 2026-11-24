@@ -1,3 +1,6 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* Yoann Padioleau
  *
  * Copyright (C) 2020 Semgrep Inc, 2025 Opengrep.

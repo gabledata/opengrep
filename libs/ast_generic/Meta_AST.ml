@@ -1,3 +1,6 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* deprecated: this is used by Semgrep.dump_v_format to expose the AST to
  * Semgrep playground!
  * Use AST_generic.show_any instead.
