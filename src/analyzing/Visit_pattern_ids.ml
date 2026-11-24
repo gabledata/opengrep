@@ -1,5 +1,6 @@
 (* Gable modification notice. This file was changed by Gable.ai:
      2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+     2026-11-24  Document the v1 default encoding and test defaults per form
    See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* Brandon Wu
  *

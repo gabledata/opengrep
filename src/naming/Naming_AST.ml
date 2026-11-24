@@ -1,5 +1,6 @@
 (* Gable modification notice. This file was changed by Gable.ai:
      2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+     2026-11-24  Evaluate destructuring targets before defaults; bind catch defaults
    See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* Yoann Padioleau, Iago Abal
  *
