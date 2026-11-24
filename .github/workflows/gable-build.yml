@@ -1,0 +1,233 @@
+name: gable-build
+
+# Builds and tests the opengrep executable on the three platforms Gable ships:
+# Linux x86_64 and ARM64 (static, inside Alpine, as upstream releases are built)
+# and macOS ARM64. A release calls this with its tag, which is stamped into the
+# version the executable reports.
+
+on:
+  push:
+    branches: ["gable/**", "fix/**"]
+  pull_request:
+    branches: ["gable/**"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag (vX.Y.Z-gable.N) to stamp into the reported version; empty for an unstamped build"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  OCAML_VERSION: "5.5.1"
+  # lwt 6.1.3 (20 Nov 2026) makes OpenGrep crash with a segmentation fault
+  # after it fetches registry rules ("fetch ocaml rules" in the core tests).
+  # OpenGrep does not pin lwt, so hold it at 6.1.2. Keep in step with
+  # gable-release.yml.
+  LWT_VERSION: "6.1.2"
+  RELEASE_TAG: ${{ inputs.tag }}
+
+jobs:
+  # A base branch is public, so every change on it must already carry its
+  # modification notice, not only at release time.
+  notices:
+    if: startsWith(github.ref_name, 'gable/') || startsWith(github.base_ref, 'gable/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check every modified file carries its notice
+        run: |
+          branch="${GITHUB_BASE_REF:-$GITHUB_REF_NAME}"
+          base="${branch#gable/}"
+          python3 gable/notices.py --base "$base" --check || {
+            echo "Notices are stale. Run: python3 gable/notices.py --base $base, then commit the result."
+            exit 1; }
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux_x86
+            runner: ubuntu-24.04
+          - platform: linux_aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Stamp the release version
+        if: env.RELEASE_TAG != ''
+        run: python3 gable/set_version.py --tag "$RELEASE_TAG"
+
+      - name: Compute OPAM cache fingerprint
+        run: ./scripts/opam-cache-fingerprint.sh
+
+      - name: Restore the OPAM switch
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: gable-${{ runner.os }}-${{ runner.arch }}-opam-${{ env.OCAML_VERSION }}-lwt${{ env.LWT_VERSION }}-${{ hashFiles('.ci-cache/opam-fingerprint.txt') }}
+          restore-keys: |
+            gable-${{ runner.os }}-${{ runner.arch }}-opam-${{ env.OCAML_VERSION }}-lwt${{ env.LWT_VERSION }}-
+          path: _opam
+
+      - name: Build and test inside Alpine
+        run: |
+          # Upstream's build script, with lwt pinned before its dependencies
+          # are installed.
+          awk -v v="$LWT_VERSION" '/^make install-opam-deps/ { print "opam pin add -y -n lwt " v } { print }' \
+            scripts/workflow-build-inside-alpine-container.sh > gable-build-inside-alpine.sh
+          grep -q "^opam pin add -y -n lwt" gable-build-inside-alpine.sh || { echo "could not pin lwt in the build script"; exit 1; }
+          chmod +x gable-build-inside-alpine.sh
+          init=true
+          [ -d _opam ] && init=false
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace" --workdir /workspace \
+            --env SHOULD_INIT_OPAM="$init" --env OCAML_VERSION="$OCAML_VERSION" \
+            --env OPAMROOT=/workspace/_opam \
+            alpine:3.22 \
+            sh -c 'set -e
+                   mkdir -p _opam && chown -R root:root _opam
+                   ./gable-build-inside-alpine.sh
+                   eval $(opam env)
+                   opam list --installed --short --columns=name,version > build-packages.txt
+                   opam --version > build-opam-version.txt
+                   cp _build/default/libs/ast_generic/ast_generic_v1_t.ml .
+                   chown -R '"$(id -u):$(id -g)"' _opam build-packages.txt build-opam-version.txt ast_generic_v1_t.ml'
+
+      - name: Check the executable
+        run: |
+          file -L bin/opengrep | grep -q "statically linked" || { file -L bin/opengrep; echo "the Linux executable must be statically linked"; exit 1; }
+          version="$(bin/opengrep --core -version | awk 'END {print $NF}')"
+          echo "reports $version"
+          if [ -n "$RELEASE_TAG" ]; then
+            case "$version" in *+gable.*) ;; *) echo "the release version was not stamped"; exit 1 ;; esac
+          fi
+          bin/opengrep --core -show_ast_json -lang typescript tests/patterns/ts/destructure_param_default.ts > /dev/null
+          echo "$version" > build-version.txt
+
+      - name: Package
+        run: |
+          mkdir -p out/payload
+          cp bin/opengrep out/payload/opengrep
+          tar -C out/payload -czf "out/opengrep_${{ matrix.platform }}.tgz" opengrep
+          image="$(docker image inspect --format '{{index .RepoDigests 0}}' alpine:3.22)"
+          python3 - "${{ matrix.platform }}" "$image" <<'PY'
+          import json, sys
+          platform, image = sys.argv[1:]
+          info = {
+              "version": open("build-version.txt").read().strip(),
+              "builder": f"{image} container on ${{ matrix.runner }}",
+              "ocaml": "${{ env.OCAML_VERSION }}",
+              "opam": open("build-opam-version.txt").read().strip(),
+              "packages": open("build-packages.txt").read().split(),
+          }
+          json.dump(info, open(f"out/build-info-{platform}.json", "w"), indent=2)
+          PY
+          if [ "${{ matrix.platform }}" = linux_x86 ]; then cp ast_generic_v1_t.ml out/; fi
+
+      # Only a release build publishes its executables. Pushes and pull requests
+      # build and test but upload nothing: workflow artifacts on a public
+      # repository can be downloaded by anyone signed in to GitHub.
+      - if: env.RELEASE_TAG != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: opengrep_${{ matrix.platform }}
+          path: |
+            out/*.tgz
+            out/*.json
+            out/*.ml
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Stamp the release version
+        if: env.RELEASE_TAG != ''
+        run: python3 gable/set_version.py --tag "$RELEASE_TAG"
+
+      - name: Compute OPAM cache fingerprint
+        run: ./scripts/opam-cache-fingerprint.sh
+
+      - name: Restore the OPAM root
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          key: gable-${{ runner.os }}-${{ runner.arch }}-opam-${{ env.OCAML_VERSION }}-lwt${{ env.LWT_VERSION }}-${{ hashFiles('.ci-cache/opam-fingerprint.txt') }}
+          restore-keys: |
+            gable-${{ runner.os }}-${{ runner.arch }}-opam-${{ env.OCAML_VERSION }}-lwt${{ env.LWT_VERSION }}-
+          path: ~/.opam
+
+      - name: Install dependencies
+        run: |
+          # Upstream's setup script, with lwt pinned before its dependencies
+          # are installed.
+          awk -v v="$LWT_VERSION" '/make install-deps-for-semgrep-core/ { print "opam pin add -y -n lwt " v } { print }' \
+            scripts/osx-setup-for-release.sh > gable-osx-setup.sh
+          grep -q "^opam pin add -y -n lwt" gable-osx-setup.sh || { echo "could not pin lwt in the setup script"; exit 1; }
+          bash gable-osx-setup.sh "$OCAML_VERSION"
+
+      - name: Build
+        run: opam exec -- make core
+
+      - name: Test
+        # Without GITHUB_ACTIONS, as in the Linux container: with it, the tests
+        # that run 'opengrep ci' take this pull request for theirs and try a
+        # diff-aware scan against its base commit, which their temporary
+        # repositories do not have, so they find nothing.
+        run: env -u GITHUB_ACTIONS opam exec -- make core-test
+
+      - name: Check the executable
+        run: |
+          # Only system libraries may be linked dynamically, so the executable
+          # runs without Homebrew.
+          if otool -L bin/opengrep | tail -n +2 | grep -v -E '^\s+/(usr/lib|System/Library)/'; then
+            echo "the macOS executable links libraries outside the system"; exit 1
+          fi
+          version="$(bin/opengrep --core -version | awk 'END {print $NF}')"
+          echo "reports $version"
+          if [ -n "$RELEASE_TAG" ]; then
+            case "$version" in *+gable.*) ;; *) echo "the release version was not stamped"; exit 1 ;; esac
+          fi
+          bin/opengrep --core -show_ast_json -lang typescript tests/patterns/ts/destructure_param_default.ts > /dev/null
+          echo "$version" > build-version.txt
+
+      - name: Package
+        run: |
+          mkdir -p out/payload
+          cp bin/opengrep out/payload/opengrep
+          # Without these, macOS tar adds an AppleDouble ._opengrep entry for the
+          # executable's extended attributes.
+          COPYFILE_DISABLE=1 tar --no-xattrs -C out/payload -czf out/opengrep_osx_arm64.tgz opengrep
+          opam list --installed --short --columns=name,version > build-packages.txt
+          python3 - <<'PY'
+          import json, subprocess
+          info = {
+              "version": open("build-version.txt").read().strip(),
+              "builder": "macos-15 runner, " + subprocess.run(["sw_vers", "-productVersion"], capture_output=True, text=True).stdout.strip(),
+              "ocaml": "${{ env.OCAML_VERSION }}",
+              "opam": subprocess.run(["opam", "--version"], capture_output=True, text=True).stdout.strip(),
+              "packages": open("build-packages.txt").read().split(),
+          }
+          json.dump(info, open("out/build-info-osx_arm64.json", "w"), indent=2)
+          PY
+
+      # Only a release build publishes its executables. Pushes and pull requests
+      # build and test but upload nothing: workflow artifacts on a public
+      # repository can be downloaded by anyone signed in to GitHub.
+      - if: env.RELEASE_TAG != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: opengrep_osx_arm64
+          path: |
+            out/*.tgz
+            out/*.json

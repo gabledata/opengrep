@@ -1,0 +1,161 @@
+name: gable-release
+
+# Turns a vX.Y.Z-gable.N tag into a draft GitHub release. The builds, the
+# source archive and a rebuild from that archive run first. Creating the draft
+# needs approval in the protected `release` environment; publishing the draft
+# is a second, manual step.
+
+on:
+  push:
+    tags: ["v*-gable.*"]
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ github.ref_name }}
+  # Keep in step with gable-build.yml, which explains the pin.
+  LWT_VERSION: "6.1.2"
+
+jobs:
+  check-tag:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag names this branch's upstream base
+        run: |
+          python3 gable/set_version.py --tag "$TAG" > /dev/null
+          git checkout -- src/core/Version.ml
+
+      - name: Check the tagged commit is on a base branch
+        run: |
+          git branch -r --contains HEAD | grep -q 'origin/gable/' || {
+            echo "$TAG must point at a commit on a gable/ base branch"; exit 1; }
+
+      - name: Check every modified file carries its notice
+        run: python3 gable/notices.py --base "${TAG%%-gable.*}" --check
+
+  build:
+    needs: check-tag
+    uses: ./.github/workflows/gable-build.yml
+    with:
+      tag: ${{ github.ref_name }}
+
+  source:
+    needs: check-tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+
+      # The archive must be the source of the executables shipped, which report
+      # the stamped version.
+      - name: Stamp the release version
+        run: python3 gable/set_version.py --tag "$TAG"
+
+      # Stamping changes upstream's src/core/Version.ml, so the published source
+      # needs a notice for that change as well as for the committed ones.
+      - name: Add the notice for the version stamp
+        run: |
+          stamp="Stamp the release version $TAG"
+          python3 gable/notices.py --base "${TAG%%-gable.*}" --uncommitted "$stamp"
+          python3 gable/notices.py --base "${TAG%%-gable.*}" --uncommitted "$stamp" --check
+
+      - name: Pack the complete source
+        run: |
+          mkdir -p out
+          python3 gable/source_archive.py --output "out/opengrep-$TAG-source.tar.gz" --prefix "opengrep-$TAG"
+          cp GABLE-MODIFICATIONS.md out/
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source
+          path: |
+            out/opengrep-${{ github.ref_name }}-source.tar.gz
+            out/GABLE-MODIFICATIONS.md
+
+  # Proves the archive is complete: it must build and report the same version
+  # as the released executables, with no Git checkout and no cache.
+  rebuild-from-source:
+    needs: source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+
+      - name: Build from the archive inside Alpine
+        run: |
+          tar xzf "opengrep-$TAG-source.tar.gz"
+          cd "opengrep-$TAG"
+          # Upstream's build script with lwt pinned, as in gable-build.yml, and
+          # without its test step: the archive leaves out the tests/semgrep-rules
+          # submodule, and this job only proves the build.
+          awk -v v="$LWT_VERSION" '/^make install-opam-deps/ { print "opam pin add -y -n lwt " v } /make core-test/ { next } { print }' \
+            scripts/workflow-build-inside-alpine-container.sh > build-only.sh
+          grep -q "^opam pin add -y -n lwt" build-only.sh || { echo "could not pin lwt in the build script"; exit 1; }
+          chmod +x build-only.sh
+          docker run --rm --volume "$PWD:/workspace" --workdir /workspace \
+            alpine:3.22 sh -c 'set -e; mkdir -p _opam; ./build-only.sh'
+          version="$(bin/opengrep --core -version | awk 'END {print $NF}')"
+          echo "rebuilt executable reports $version"
+          case "$version" in *+gable.*) ;; *) echo "the archive's version is not stamped"; exit 1 ;; esac
+          echo "$version" > "$GITHUB_WORKSPACE/rebuilt-version.txt"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rebuilt-version
+          path: rebuilt-version.txt
+
+  publish:
+    needs: [build, source, rebuild-from-source]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      id-token: write # keyless Cosign signing
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: artifacts/
+
+      - name: Assemble the release
+        run: |
+          python3 gable/assemble_release.py --tag "$TAG" --artifacts artifacts --out release \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          released="$(python3 -c 'import json; print(json.load(open("release/manifest.json"))["version"])')"
+          rebuilt="$(cat artifacts/rebuilt-version/rebuilt-version.txt)"
+          [ "$released" = "$rebuilt" ] || { echo "rebuilt $rebuilt, released $released"; exit 1; }
+          ls -l release
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
+      - name: Sign the executables
+        run: |
+          for bin in release/opengrep_linux_x86 release/opengrep_linux_aarch64 release/opengrep_osx_arm64; do
+            cosign sign-blob --yes --output-signature "$bin.sig" --output-certificate "$bin.cert" "$bin"
+          done
+          # Written again so it also covers the signatures and certificates.
+          (cd release && rm SHA256SUMS && sha256sum -- * > SHA256SUMS && sha256sum --check --quiet SHA256SUMS)
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          base="${TAG%%-gable.*}"
+          build="${TAG##*-gable.}"
+          {
+            echo "OpenGrep ${base#v} with Gable's enhancements, build $build. This is Gable's build of OpenGrep, not an official OpenGrep release."
+            echo
+            echo "The enhancements it carries are listed in GABLE-MODIFICATIONS.md. The complete source of these executables is opengrep-$TAG-source.tar.gz, and SHA256SUMS covers every file."
+          } > notes.md
+          gh release create "$TAG" --draft --verify-tag \
+            --title "OpenGrep ${base#v} with Gable enhancements, build $build" \
+            --notes-file notes.md release/*
