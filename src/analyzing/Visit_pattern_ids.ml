@@ -22,7 +22,8 @@ class ['self] pat_id_visitor =
   object (self : 'self)
     inherit ['self] AST_generic.iter_no_id_info as super
 
-    method! visit_pattern store pat =
+    method! visit_pattern (store : (G.ident * G.id_info) Stack_.t)
+        (pat : G.pattern) =
       match pat with
       | PatAs (_, (id, id_info))
       | PatId (id, id_info) ->

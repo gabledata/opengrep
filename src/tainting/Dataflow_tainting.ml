@@ -3230,7 +3230,9 @@ let pattern_leaves_with_offsets ~(lang : Lang.t) (pat : AST_generic.pattern) :
              (mk_field (prefix ^ String_.strip_wrapping_char ':' s, tok)))
     | _ -> None
   in
-  let rec go offset pat acc =
+  let rec go (offset : Taint.offset list) (pat : G.pattern)
+      (acc : (IL.name * Taint.offset list) list) :
+      (IL.name * Taint.offset list) list =
     match pat with
     | G.PatId (id, id_info) ->
         let il_name = AST_to_IL.var_of_id_info id id_info in

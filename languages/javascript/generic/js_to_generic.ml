@@ -657,7 +657,8 @@ and parameter_binding = function
       | Some tok -> G.ParamRest (tok, pclassic))
   | ParamEllipsis x -> G.ParamEllipsis x
 
-and pattern = function
+and pattern (x : a_pattern) : G.pattern =
+  match x with
   | Obj (left, fields, right) ->
       let fields = List.filter_map pattern_property fields in
       G.PatRecord (left, fields, right)
@@ -666,7 +667,8 @@ and pattern = function
       G.PatDefault (pattern binding, info equals, expr default)
   | x -> H.expr_to_pattern (expr x)
 
-and pattern_property = function
+and pattern_property (x : property) : (G.dotted_ident * G.pattern) option =
+  match x with
   | Field { fld_name = PN id; fld_body = Some binding; _ }
   | FieldColon { fld_name = PN id; fld_body = Some binding; _ } ->
       Some ([ name id ], pattern binding)

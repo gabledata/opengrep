@@ -3202,7 +3202,7 @@ and m_other_stmt_with_stmt_operator a b =
 (*****************************************************************************)
 (* Pattern *)
 (*****************************************************************************)
-and m_pattern a b =
+and m_pattern (a : G.pattern) (b : B.pattern) =
   (* NOTE: We need this for things like destructuring in Elixir functions (and
    * general destructuring of lists), so that the pattern [..., $ARG, ...] works.
    * Recall that some functions are always encoded as switch & pattern matching.

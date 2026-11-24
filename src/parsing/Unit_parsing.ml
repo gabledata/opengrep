@@ -305,37 +305,102 @@ let parsing_rules_with_atd_tests () =
 (*****************************************************************************)
 
 let destructuring_default_export_tests () =
-  let parameter : Ast_generic_v1_t.stmt -> Ast_generic_v1_t.parameter = function
+  let parameter (statement : Ast_generic_v1_t.stmt) :
+      Ast_generic_v1_t.parameter =
+    match statement with
     | `DefStmt (_, `FuncDef { fparams = [ parameter ]; _ }) -> parameter
     | _ -> Alcotest.fail "expected a function with one parameter"
   in
-  let rec token_count name = function
+  let rec token_count (name : string) (json : Yojson.Safe.t) : int =
+    match json with
     | `List [ `String "OriginTok"; `Assoc fields ] -> (
         match List.assoc_opt "str" fields with
         | Some (`String value) when String.equal name value -> 1
         | _ -> 0)
     | `List values ->
         List.fold_left
-          (fun count value -> count + token_count name value)
+          (fun (count : int) (value : Yojson.Safe.t) ->
+            count + token_count name value)
           0 values
     | `Assoc fields ->
         List.fold_left
-          (fun count (key, value) ->
+          (fun (count : int) ((key, value) : string * Yojson.Safe.t) ->
             if String.equal key "id_svalue" then count
             else count + token_count name value)
           0 fields
     | _ -> 0
   in
-  let check_tokens statement expected =
+  let check_tokens (statement : Ast_generic_v1_t.stmt)
+      (expected : (string * int) list) : unit =
     let json =
       Ast_generic_v1_j.string_of_parameter (parameter statement)
       |> Yojson.Safe.from_string
     in
     List.iter
-      (fun (name, count) ->
+      (fun ((name : string), (count : int)) ->
         Alcotest.(check int)
           ("retained token " ^ name) count (token_count name json))
       expected
+  in
+  (* A compact rendering of an exported binding pattern: a default appears
+     as [pattern = name] when it is a name and as [pattern = ...] otherwise. *)
+  let rec pattern_shape (pattern : Ast_generic_v1_t.pattern) : string =
+    match pattern with
+    | `PatId ((name, _), _) -> name
+    | `PatRecord (_, fields, _) ->
+        let field
+            ((key, pattern) :
+              Ast_generic_v1_t.dotted_ident * Ast_generic_v1_t.pattern) =
+          String.concat "." (List.map fst key) ^ ": " ^ pattern_shape pattern
+        in
+        "{" ^ String.concat ", " (List.map field fields) ^ "}"
+    | `PatList (_, elements, _) ->
+        "[" ^ String.concat ", " (List.map pattern_shape elements) ^ "]"
+    | `OtherPat (("ExprToPattern", _), [ `E (`LetPattern (pattern, default)) ])
+      ->
+        let default =
+          match default with
+          | `N (`Id ((name, _), _)) -> name
+          | _ -> "..."
+        in
+        pattern_shape pattern ^ " = " ^ default
+    | `PatTyped (pattern, _) -> pattern_shape pattern ^ ": type"
+    | _ -> Alcotest.fail "unexpected exported pattern"
+  in
+  let binding_pattern (statement : Ast_generic_v1_t.stmt) :
+      Ast_generic_v1_t.pattern =
+    match statement with
+    | `DefStmt (_, `FuncDef { fparams = [ `ParamPattern pattern ]; _ })
+    | `Try (_, _, [ (_, `CatchPattern pattern, _) ], _)
+    | `For (_, `ForEach (pattern, _, _), _) ->
+        pattern
+    | _ -> Alcotest.fail "expected a parameter, catch or loop pattern"
+  in
+  (* One shape per statement of destructuring_defaults.js, in order: each
+     form with a default is followed by the same form without one. *)
+  let binding_form_shapes =
+    [
+      "{a: a} = fallback";
+      "{a: a}";
+      "{a: a = fallback}";
+      "{a: a}";
+      "{a: b = fallback}";
+      "{a: b}";
+      "{a: {b: b} = fallback}";
+      "{a: {b: b}}";
+      "[a = fallback, b]";
+      "[a, b]";
+      "[[a] = fallback]";
+      "[[a]]";
+      "{a: a = fallback}";
+      "{a: a}";
+      "[a = fallback]";
+      "[a]";
+      "{a: a = fallback}";
+      "{a: a}";
+      "[a = fallback]";
+      "[a]";
+    ]
   in
   Testo.categorize "V1 AST export"
     [
@@ -348,7 +413,7 @@ let destructuring_default_export_tests () =
           let exported = AST_generic_to_v1.program ast in
           match exported with
           | [
-           _with_default;
+           with_default;
            without_default;
            with_callback;
            with_fields;
@@ -356,9 +421,19 @@ let destructuring_default_export_tests () =
            with_array;
            with_array_default;
           ] ->
-              (match parameter without_default with
-              | `ParamPattern (`PatRecord _) -> ()
-              | _ -> Alcotest.fail "nondefault pattern changed shape");
+              List.iter
+                (fun ( (label : string),
+                       (statement : Ast_generic_v1_t.stmt),
+                       (expected : string) ) ->
+                  match parameter statement with
+                  | `ParamPattern pattern ->
+                      Alcotest.(check string) label expected
+                        (pattern_shape pattern)
+                  | _ -> Alcotest.failf "%s: expected a pattern" label)
+                [
+                  ("parameter default", with_default, "{a: a, b: b} = ...");
+                  ("no default", without_default, "{a: a, b: b}");
+                ];
               (match parameter with_callback with
               | `ParamPattern
                   (`PatTyped
@@ -375,7 +450,10 @@ let destructuring_default_export_tests () =
               | `ParamPattern (`PatTyped (`PatRecord (_, fields, _), _)) ->
                   let bindings =
                     List.map
-                      (function
+                      (fun (field :
+                             Ast_generic_v1_t.dotted_ident
+                             * Ast_generic_v1_t.pattern) ->
+                        match field with
                         | ( [ (label, _) ],
                             `OtherPat
                               ( ("ExprToPattern", _),
@@ -430,6 +508,18 @@ let destructuring_default_export_tests () =
               | _ -> Alcotest.fail "array default or sibling was lost");
               check_tokens with_array_default [ ("helper", 1) ]
           | _ -> Alcotest.fail "expected seven function declarations");
+      t ~tags:(Test_tags.tags_of_lang Lang.Js)
+        "destructuring defaults in every binding form" (fun () ->
+          let file = tests_path_parsing / "js" / "destructuring_defaults.js" in
+          [ Lang.Js; Lang.Ts ]
+          |> List.iter (fun (lang : Lang.t) ->
+                 let ast = Parse_target.parse_and_resolve_name_strict lang file in
+                 Alcotest.(check (list string))
+                   (Lang.to_string lang ^ " exported shapes")
+                   binding_form_shapes
+                   (AST_generic_to_v1.program ast
+                   |> List.map (fun (statement : Ast_generic_v1_t.stmt) ->
+                          pattern_shape (binding_pattern statement)))));
     ]
 
 let make_tests langs_with_tolerance =

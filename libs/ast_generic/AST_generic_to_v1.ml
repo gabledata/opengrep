@@ -1024,15 +1024,19 @@ and map_pattern = function
       let v1 = map_pattern v1 and v2 = map_expr v2 in
       `PatWhen (v1, v2)
   | PatDefault (pattern, tok, default) ->
-      map_default_pattern ~tok pattern default
+      map_default_pattern tok pattern default
   | OtherPat (v1, v2) ->
       let v1 = map_todo_kind v1 and v2 = map_of_list map_any v2 in
       `OtherPat (v1, v2)
 
-and map_default_pattern ?(tok = fk) pattern default =
+(* The v1 schema has no default pattern: a pattern with a default, which binds
+   the default when the input is undefined, is exported as
+   [OtherPat ("ExprToPattern", [E (LetPattern (pattern, default))])], with a
+   type annotation kept outermost. *)
+and map_default_pattern (tok : tok) (pattern : pattern) (default : expr) =
   match pattern with
   | PatTyped (pattern, typ) ->
-      `PatTyped (map_default_pattern ~tok pattern default, map_type_ typ)
+      `PatTyped (map_default_pattern tok pattern default, map_type_ typ)
   | _ ->
       `OtherPat
         ( ("ExprToPattern", map_tok tok),
@@ -1182,7 +1186,7 @@ and map_parameter = function
       let pattern =
         match pdefault with
         | None -> map_pattern pattern
-        | Some default -> map_default_pattern pattern default
+        | Some default -> map_default_pattern fk pattern default
       in
       `ParamPattern pattern
   | ParamEllipsis v1 -> raise (SemgrepConstruct v1)
