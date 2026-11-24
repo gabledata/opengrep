@@ -6,8 +6,11 @@ name: gable-build
 # version the executable reports.
 
 on:
+  # Working branches are built through their pull requests only. A push build
+  # of the same commit would skip the notices job, which runs only for gable/
+  # branches, and a skipped required check counts as passed.
   push:
-    branches: ["gable/**", "fix/**"]
+    branches: ["gable/**"]
   pull_request:
     branches: ["gable/**"]
   workflow_call:
