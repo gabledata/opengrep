@@ -164,6 +164,27 @@ let check_single_binding ast name =
                (spf "all uses of '%s' share one binding" name)
                first sid)
 
+(* The sid of the only pattern binding of [name]. *)
+let pattern_binding_sid (ast : AST_generic.program) (name : string) :
+    AST_generic.SId.t =
+  let bindings = ref [] in
+  let visitor =
+    object
+      inherit [_] AST_generic.iter_no_id_info as super
+
+      method! visit_pattern (venv : unit) (pat : AST_generic.pattern) =
+        (match pat with
+        | AST_generic.PatId ((s, _), info) when String.equal s name ->
+            bindings := !(info.AST_generic.id_resolved) :: !bindings
+        | _ -> ());
+        super#visit_pattern venv pat
+    end
+  in
+  visitor#visit_program () ast;
+  match !bindings with
+  | [ Some (_, sid) ] -> sid
+  | _ -> Alcotest.failf "expected one %s binding" name
+
 let tests parse_program =
   Testo.categorize "naming generic"
     [
@@ -189,26 +210,7 @@ let tests parse_program =
           in
           let ast = parse_program file in
           Naming_AST.resolve Lang.Ts ast;
-          let binding_sid name =
-            let bindings = ref [] in
-            let visitor =
-              object
-                inherit [_] AST_generic.iter_no_id_info as super
-
-                method! visit_pattern env pat =
-                  (match pat with
-                  | AST_generic.PatId ((s, _), info) when s = name ->
-                      bindings := !(info.AST_generic.id_resolved) :: !bindings
-                  | _ -> ());
-                  super#visit_pattern env pat
-              end
-            in
-            visitor#visit_program () ast;
-            match !bindings with
-            | [ Some (_, sid) ] -> sid
-            | _ -> Alcotest.failf "expected one %s binding" name
-          in
-          let self = binding_sid "self" in
+          let self = pattern_binding_sid ast "self" in
           (match resolutions_of_name ast "self" with
           | [ Some (_, capture); Some (_, body) ] ->
               Alcotest.(check bool)
@@ -224,7 +226,7 @@ let tests parse_program =
                 "annotation resolves visible outer names" true
                 (AST_generic.SId.equal declaration annotation)
           | _ -> Alcotest.fail "expected the annotation's outer type query");
-          let later = binding_sid "later" in
+          let later = pattern_binding_sid ast "later" in
           match
             (def_sid_of_name ast "later", resolutions_of_name ast "later")
           with
@@ -240,12 +242,60 @@ let tests parse_program =
                 (AST_generic.SId.equal global outside
                 && not (AST_generic.SId.equal global later));
               List.iter
-                (fun sid ->
+                (fun (sid : AST_generic.SId.t) ->
                   Alcotest.(check bool)
                     "later binding keeps both captures and body" true
                     (AST_generic.SId.equal later sid))
                 [ earlier; own; body ]
           | _ -> Alcotest.fail "expected global, later capture and body uses");
+      t "catch pattern defaults resolve to the catch bindings" (fun () ->
+          let file =
+            Fpath.v (tests_path ^ "/naming/js/destructuring_default_catch.ts")
+          in
+          let ast = parse_program file in
+          Naming_AST.resolve Lang.Ts ast;
+          let check_uses (label : string) (name : string)
+              (expected : AST_generic.SId.t) (count : int) =
+            let uses = resolutions_of_name ast name in
+            Alcotest.(check int) (label ^ ": uses") count (List.length uses);
+            List.iter
+              (fun (use : AST_generic.resolved_name option) ->
+                match use with
+                | Some (_, sid) ->
+                    Alcotest.(check bool) label true
+                      (AST_generic.SId.equal expected sid)
+                | None -> Alcotest.failf "%s: unresolved use" label)
+              uses
+          in
+          let outer_handler =
+            match def_sid_of_name ast "handler" with
+            | Some sid -> sid
+            | None -> Alcotest.fail "expected the outer handler"
+          in
+          let handler = pattern_binding_sid ast "handler" in
+          Alcotest.(check bool)
+            "the catch binding is distinct from the outer handler" false
+            (AST_generic.SId.equal outer_handler handler);
+          check_uses "default and body refer to the catch binding" "handler"
+            handler 2;
+          check_uses "a default refers to a later catch binding" "late"
+            (pattern_binding_sid ast "late")
+            1;
+          check_uses "array element default and body refer to the binding"
+            "element"
+            (pattern_binding_sid ast "element")
+            2;
+          (match def_sid_of_name ast "outer" with
+          | Some outer ->
+              check_uses "a name the pattern does not bind keeps its binding"
+                "outer" outer 1
+          | None -> Alcotest.fail "expected the outer declaration");
+          match def_sid_of_name ast "assigned" with
+          | Some assigned ->
+              check_uses
+                "an assignment head default refers to the assigned variable"
+                "assigned" assigned 1
+          | None -> Alcotest.fail "expected the assigned declaration");
       t "switch value labels preserve the constant binding" (fun () ->
           [
             ("c", "c");

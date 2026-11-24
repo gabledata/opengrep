@@ -1129,10 +1129,29 @@ let assign_implicitly_declares lang =
 (* Entry point *)
 (*****************************************************************************)
 
-type parameter_pattern_mode =
+(* How [visit_pattern] treats the bindings of a pattern whose defaults can
+   refer to any binding of the pattern: a first pass declares the bindings
+   without visiting the defaults, a second pass visits the defaults and
+   rebinds each name to the binding the first pass declared. *)
+type binding_pattern_mode =
   | OrdinaryPattern
-  | PredeclareParameterBindings
-  | ResolveParameterBindings
+  | PredeclarePatternBindings
+  | ResolvePatternBindings
+
+let pattern_has_default (pat : pattern) : bool =
+  let visitor =
+    object
+      inherit [_] AST_generic.iter_no_id_info as super
+
+      method! visit_pattern (found : bool ref) (pat : pattern) =
+        match pat with
+        | PatDefault _ -> found := true
+        | _ -> super#visit_pattern found pat
+    end
+  in
+  let found = ref false in
+  visitor#visit_pattern found pat;
+  !found
 
 class ['self] resolve_visitor (env : env) (lang : Lang.t) =
   object (self : 'self)
@@ -1140,7 +1159,7 @@ class ['self] resolve_visitor (env : env) (lang : Lang.t) =
 
     val env = env
     val lang = lang
-    val parameter_pattern_mode = ref OrdinaryPattern
+    val binding_pattern_mode = ref OrdinaryPattern
 
     (* ---------- *)
     (* !the defs! *)
@@ -1160,7 +1179,7 @@ class ['self] resolve_visitor (env : env) (lang : Lang.t) =
           self#visit_attributes_and_type_parameters venv attrs tparams
       | _ -> self#visit_entity venv entity
 
-    method! visit_function_definition venv x =
+    method! visit_function_definition (venv : unit) (x : function_definition) =
       (* todo: add the function as a Global. In fact we should do a first
        * pass for some languages to add all of them first, because
        * Go for example allow the use of forward function reference
@@ -1192,8 +1211,8 @@ class ['self] resolve_visitor (env : env) (lang : Lang.t) =
                * AST_to_IL will later emit a [pattern_assign_statements]
                * prelude that binds these leaves to projections of the
                * implicit binder. *)
-              Common.save_excursion_unsafe parameter_pattern_mode
-                PredeclareParameterBindings (fun () ->
+              Common.save_excursion_unsafe binding_pattern_mode
+                PredeclarePatternBindings (fun () ->
                   Tok.unbracket x.fparams
                   |> List.iter (function
                        | ParamPattern (((PatDefault _ | PatTyped _) as pat), _) ->
@@ -1206,22 +1225,24 @@ class ['self] resolve_visitor (env : env) (lang : Lang.t) =
                * (see tests/naming/python/shadow_name_type.py) *)
               super#visit_function_definition venv x)))
 
-    method! visit_parameter venv parameter =
+    method! visit_parameter (venv : unit) (parameter : parameter) =
       match parameter with
       | ParamPattern (pat, classic) ->
-          Common.save_excursion_unsafe parameter_pattern_mode
-            ResolveParameterBindings (fun () -> self#visit_pattern venv pat);
+          Common.save_excursion_unsafe binding_pattern_mode
+            ResolvePatternBindings (fun () -> self#visit_pattern venv pat);
           super#visit_parameter_classic venv classic
       | _ -> super#visit_parameter venv parameter
 
-    (* Defaults may capture any predeclared parameter leaf, including later ones. *)
-    method private declare_pattern_binding id id_info vtype =
+    (* Defaults may capture any predeclared binding of the pattern, including
+       later ones. *)
+    method private declare_pattern_binding (id : ident) (id_info : id_info)
+        (vtype : type_ option) =
       match
-        ( !parameter_pattern_mode,
+        ( !binding_pattern_mode,
           !(id_info.id_resolved),
           lookup_scope_opt id env )
       with
-      | ResolveParameterBindings, Some (_, sid), Some resolved
+      | ResolvePatternBindings, Some (_, sid), Some resolved
         when SId.equal sid (snd resolved.entname) ->
           let resolved =
             match vtype with
@@ -1233,17 +1254,32 @@ class ['self] resolve_visitor (env : env) (lang : Lang.t) =
           set_resolved env id_info resolved
       | _ -> declare_var env lang id id_info ~explicit:true None vtype
 
-    method private visit_pattern_type venv ty =
+    method private visit_pattern_type (venv : unit) (ty : type_) =
       let visit () =
         Common.save_excursion_unsafe env.in_lvalue true (fun () ->
             super#visit_type_ venv ty)
       in
-      match !parameter_pattern_mode with
+      match !binding_pattern_mode with
       | OrdinaryPattern -> visit ()
-      | PredeclareParameterBindings
-      | ResolveParameterBindings ->
-          (* Annotation fields must not shadow runtime parameter bindings. *)
+      | PredeclarePatternBindings
+      | ResolvePatternBindings ->
+          (* Annotation fields must not shadow runtime pattern bindings. *)
           with_new_block_scope env.names visit
+
+    (* The annotation of a single binding is visited only by the pass that
+       predeclares the binding; the other modes leave it unvisited. *)
+    method private visit_predeclared_pattern_type (venv : unit) (ty : type_) =
+      match !binding_pattern_mode with
+      | PredeclarePatternBindings -> self#visit_pattern_type venv ty
+      | OrdinaryPattern
+      | ResolvePatternBindings ->
+          ()
+
+    method private visit_pattern_with_defaults (venv : unit) (pat : pattern) =
+      Common.save_excursion_unsafe binding_pattern_mode
+        PredeclarePatternBindings (fun () -> self#visit_pattern venv pat);
+      Common.save_excursion_unsafe binding_pattern_mode ResolvePatternBindings
+        (fun () -> self#visit_pattern venv pat)
 
     method! visit_definition venv x =
       match x with
@@ -1593,17 +1629,21 @@ class ['self] resolve_visitor (env : env) (lang : Lang.t) =
       | _ -> ());
       super#visit_directive venv x
 
-    method! visit_catch venv x =
-      let _t, exn, _st = x in
-      (match exn with
+    method! visit_catch (venv : unit) (x : catch) =
+      let tok, exn, st = x in
+      match exn with
       (* TODO: we should create a new block scope *)
       | CatchParam { pname = Some id; pinfo = id_info; _ }
         when is_resolvable_name_ctx env lang ->
-          declare_var env lang id id_info ~explicit:true None None
-      | _ -> ());
-      super#visit_catch venv x
+          declare_var env lang id id_info ~explicit:true None None;
+          super#visit_catch venv x
+      | CatchPattern pat when pattern_has_default pat ->
+          self#visit_tok venv tok;
+          self#visit_pattern_with_defaults venv pat;
+          self#visit_stmt venv st
+      | _ -> super#visit_catch venv x
 
-    method! visit_pattern venv x =
+    method! visit_pattern (venv : unit) (x : pattern) =
       let declare_and_visit id id_info =
         self#declare_pattern_binding id id_info None;
         (* TODO: Should we visit before declaring? Better, if we
@@ -1632,22 +1672,23 @@ class ['self] resolve_visitor (env : env) (lang : Lang.t) =
            *)
           declare_and_visit id id_info
       | PatDefault (binding, _equals, default) ->
-          if !parameter_pattern_mode <> PredeclareParameterBindings then
-            Common.save_excursion_unsafe parameter_pattern_mode OrdinaryPattern
-              (fun () ->
-                Common.save_excursion_unsafe env.in_lvalue false (fun () ->
-                    self#visit_expr venv default));
+          (match !binding_pattern_mode with
+          | PredeclarePatternBindings -> ()
+          | OrdinaryPattern
+          | ResolvePatternBindings ->
+              Common.save_excursion_unsafe binding_pattern_mode OrdinaryPattern
+                (fun () ->
+                  Common.save_excursion_unsafe env.in_lvalue false (fun () ->
+                      self#visit_expr venv default)));
           self#visit_pattern venv binding
       | PatTyped (PatId (id, id_info), ty) when is_resolvable_name_ctx env lang
         ->
-          if Stdlib.(!parameter_pattern_mode = PredeclareParameterBindings) then
-            self#visit_pattern_type venv ty;
+          self#visit_predeclared_pattern_type venv ty;
           self#declare_pattern_binding id id_info (Some ty)
       | PatTyped (PatAs (pat', (id, id_info)), ty)
       (* TODO: Check if we need to visit `ty` also, first. *)
         when is_resolvable_name_ctx env lang ->
-          if Stdlib.(!parameter_pattern_mode = PredeclareParameterBindings) then
-            self#visit_pattern_type venv ty;
+          self#visit_predeclared_pattern_type venv ty;
           super#visit_pattern venv pat';
           self#declare_pattern_binding id id_info (Some ty)
       (* do not recurse here, we don't want the PatId case above
