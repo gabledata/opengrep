@@ -1,3 +1,7 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+     2026-11-24  Document the v1 default encoding and test defaults per form
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* Yoann Padioleau
  *
  * Copyright (C) 2019-2024 Semgrep Inc.
@@ -3199,7 +3203,7 @@ and m_other_stmt_with_stmt_operator a b =
 (*****************************************************************************)
 (* Pattern *)
 (*****************************************************************************)
-and m_pattern a b =
+and m_pattern (a : G.pattern) (b : B.pattern) =
   (* NOTE: We need this for things like destructuring in Elixir functions (and
    * general destructuring of lists), so that the pattern [..., $ARG, ...] works.
    * Recall that some functions are always encoded as switch & pattern matching.
@@ -3217,6 +3221,11 @@ and m_pattern a b =
   match (a, b) with
   (* equivalence: user-defined equivalence! *)
   | G.DisjPat (a1, a2), b -> m_pattern a1 b >||> m_pattern a2 b
+  | G.PatDefault (a1, a2, a3), B.PatDefault (b1, b2, b3) ->
+      m_pattern a1 b1 >>= fun () ->
+      m_tok a2 b2 >>= fun () -> m_expr a3 b3
+  (* Omitting a default matches the same binding with or without one. *)
+  | a, B.PatDefault (binding, _, _) -> m_pattern a binding
   (* metavar: *)
   (* less: G.PatId vs B.PatId? Use MV.Id then ? *)
   (* PatternHole consists of fake tokens only, and should match $_ but not $A *)
@@ -3308,6 +3317,7 @@ and m_pattern a b =
   | G.PatWildcard _, _
   | G.PatDisj _, _
   | G.PatWhen _, _
+  | G.PatDefault _, _
   | G.PatAs _, _
   | G.PatTyped _, _
   | G.OtherPat _, _

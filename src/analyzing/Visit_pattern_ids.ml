@@ -1,3 +1,7 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+     2026-11-24  Document the v1 default encoding and test defaults per form
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* Brandon Wu
  *
  * Copyright (C) 2023 Semgrep Inc.
@@ -16,15 +20,17 @@
 module G = AST_generic
 
 class ['self] pat_id_visitor =
-  object (_self : 'self)
+  object (self : 'self)
     inherit ['self] AST_generic.iter_no_id_info as super
 
-    method! visit_pattern store pat =
+    method! visit_pattern (store : (G.ident * G.id_info) Stack_.t)
+        (pat : G.pattern) =
       match pat with
       | PatAs (_, (id, id_info))
       | PatId (id, id_info) ->
           super#visit_pattern store pat;
           Stack_.push (id, id_info) store
+      | G.PatDefault (binding, _, _) -> self#visit_pattern store binding
       | G.OtherPat (_, [ G.E { e = G.Record (_b1, fields, _b2); _ } ]) ->
           (* JS allows object destructuring in the parameter list. *)
           (* TODO Handle array destructuring *)

@@ -1,3 +1,7 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+     2026-11-24  Document the v1 default encoding and test defaults per form
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* Yoann Padioleau, Iago Abal
  *
  * Copyright (C) 2019-2024 Semgrep Inc.
@@ -3227,7 +3231,9 @@ let pattern_leaves_with_offsets ~(lang : Lang.t) (pat : AST_generic.pattern) :
              (mk_field (prefix ^ String_.strip_wrapping_char ':' s, tok)))
     | _ -> None
   in
-  let rec go offset pat acc =
+  let rec go (offset : Taint.offset list) (pat : G.pattern)
+      (acc : (IL.name * Taint.offset list) list) :
+      (IL.name * Taint.offset list) list =
     match pat with
     | G.PatId (id, id_info) ->
         let il_name = AST_to_IL.var_of_id_info id id_info in
@@ -3247,7 +3253,9 @@ let pattern_leaves_with_offsets ~(lang : Lang.t) (pat : AST_generic.pattern) :
             in
             go offset (G.PatList (l, pairs, r)) acc
         | None -> acc)
-    | G.PatTyped (inner, _) -> go offset inner acc
+    | G.PatTyped (inner, _)
+    | G.PatDefault (inner, _, _) ->
+        go offset inner acc
     | G.PatTuple (_, pats, _) | G.PatList (_, pats, _)
       when AST_generic_helpers.is_map_pair_list pats ->
         (* Map/dict destructure: project by key, not by position. *)

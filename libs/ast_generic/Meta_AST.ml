@@ -1,3 +1,6 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-19  Preserve JavaScript destructuring defaults in the generic AST
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* deprecated: this is used by Semgrep.dump_v_format to expose the AST to
  * Semgrep playground!
  * Use AST_generic.show_any instead.
@@ -1089,6 +1092,9 @@ and vof_pattern = function
   | PatWhen (v1, v2) ->
       let v1 = vof_pattern v1 and v2 = vof_expr v2 in
       OCaml.VSum ("PatWhen", [ v1; v2 ])
+  | PatDefault (pattern, tok, default) ->
+      OCaml.VSum
+        ("PatDefault", [ vof_pattern pattern; vof_tok tok; vof_expr default ])
   | PatAs (v1, v2) ->
       let v1 = vof_pattern v1
       and v2 =
