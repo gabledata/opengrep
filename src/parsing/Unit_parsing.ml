@@ -1,3 +1,7 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-20  Keep dotted and numeric keys of Python mapping patterns
+     2026-11-24  Represent Python mapping patterns as open map patterns
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 open Common
 open Fpath_.Operators
 module E = Core_error
@@ -301,10 +305,68 @@ let parsing_rules_with_atd_tests () =
 (* Tests *)
 (*****************************************************************************)
 
+let python_mapping_pattern_tests () =
+  Testo.categorize "Python mapping patterns"
+    [
+      t ~tags:(Test_tags.tags_of_lang Lang.Python)
+        "a mapping pattern is a map pattern of all its entries" (fun () ->
+          let file = tests_path_parsing / "python" / "match_mapping_keys.py" in
+          let ast = Parse_target.parse_and_resolve_name_strict Lang.Python file in
+          let cases = ref [] in
+          let visitor =
+            object
+              inherit [_] AST_generic.iter_no_id_info as super
+
+              method! visit_case env case =
+                (match case with
+                | AST_generic.Case (_, pattern) -> cases := pattern :: !cases
+                | _ -> ());
+                super#visit_case env case
+            end
+          in
+          visitor#visit_program () ast;
+          let open AST_generic in
+          let entries (pattern : pattern) : pattern list option =
+            let map =
+              match pattern with
+              | PatTuple (_, [ map ], _) -> map
+              | map -> map
+            in
+            Option.map
+              (fun ((_, entries, _) : pattern list bracket) -> entries)
+              (AST_generic_helpers.map_pattern_entries map)
+          in
+          match List.rev_map entries !cases with
+          | [ mixed; strings ] ->
+              (match mixed with
+              | Some
+                  [
+                    PatKeyVal
+                      ( OtherPat
+                          (("ExprToPattern", _), [ E { e = DotAccess _; _ } ]),
+                        PatId (("found", _), _) );
+                    PatKeyVal (PatLiteral (String _), PatId (("a", _), _));
+                    PatKeyVal (PatLiteral (Int _), PatId (("one", _), _));
+                  ] ->
+                  ()
+              | _ -> Alcotest.fail "an entry of the mixed-key mapping was lost");
+              (match strings with
+              | Some
+                  [
+                    PatKeyVal (PatLiteral (String _), PatId (("a", _), _));
+                    PatKeyVal (PatLiteral (String _), PatId (("b", _), _));
+                  ] ->
+                  ()
+              | _ -> Alcotest.fail "the string-key mapping is not a map pattern")
+          | _ -> Alcotest.fail "expected two case patterns");
+    ]
+
+
 let make_tests langs_with_tolerance =
   List_.flatten
     [
       lang_parsing_tests langs_with_tolerance;
+      python_mapping_pattern_tests ();
       parsing_error_tests ();
       parsing_rules_tests ();
       supply_chain_rules_tests ();

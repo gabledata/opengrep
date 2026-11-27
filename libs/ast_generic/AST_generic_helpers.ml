@@ -1,3 +1,7 @@
+(* Gable modification notice. This file was changed by Gable.ai:
+     2026-11-20  Keep dotted and numeric keys of Python mapping patterns
+     2026-11-24  Represent Python mapping patterns as open map patterns
+   See GABLE-MODIFICATIONS.md. End of Gable modification notice. *)
 (* Yoann Padioleau
  *
  * Copyright (C) 2019-2021 Semgrep Inc.
@@ -367,9 +371,6 @@ let rec expr_to_pattern e =
   | OtherExpr (tag, [ E e ]) -> OtherPat (tag, [ P (expr_to_pattern e) ])
   | Cast (ty, _tok, expr) -> PatTyped (expr_to_pattern expr, ty)
   | LetPattern (p, {e = N (Id (i, info)); _} ) -> PatAs (p, (i, info))
-  (* coupling: emitted by Python_to_generic for `case ... if guard:`. *)
-  | OtherExpr (("CasePatWhen", _), [ E inner; E guard ]) ->
-      PatWhen (expr_to_pattern inner, guard)
   | _ -> OtherPat (("ExprToPattern", fake ""), [ E e ])
 
 exception NotAnExpr
